@@ -6,7 +6,12 @@ import { ScrapeFormat } from "../../types/index.js";
 import { getErrors } from "../../utils/errors.js";
 import { updateLog } from "../../utils/logging.js";
 import { IProxyServer } from "../../utils/proxy.js";
-import { cleanHtml, getDefuddleContent, stripBase64Images } from "../../utils/scrape/index.js";
+import {
+  cleanHtml,
+  getDefuddleContent,
+  jsonToMarkdown,
+  stripBase64Images,
+} from "../../utils/scrape/index.js";
 import { normalizeUrl } from "../../utils/url.js";
 import { PDFRequest, ScrapeRequest, ScreenshotRequest, SearchRequest } from "./actions.schema.js";
 import { DefuddleResponse } from "defuddle";
@@ -84,6 +89,7 @@ export const handleScrape = async (
     }
 
     const contentType = response?.headers()["content-type"]?.toLowerCase() || "";
+    const isJson = contentType.includes("application/json");
 
     let scrapeResponse: Record<string, any> = {};
     let htmlContent = "";
@@ -144,6 +150,25 @@ export const handleScrape = async (
       if (pdf) {
         scrapeResponse.pdf = pdfBuffer.toString("base64");
       }
+    } else if (isJson) {
+      let rawJson = "";
+      try {
+        rawJson = (await response?.text()) ?? "";
+      } catch {
+        rawJson = "";
+      }
+      htmlContent = rawJson;
+
+      scrapeResponse = {
+        content: {},
+        metadata: {
+          urlSource: normalizedUrl || url,
+          timestamp: new Date().toISOString(),
+          originalContentType: contentType,
+          statusCode: response?.status() ?? 200,
+        },
+        links: [],
+      };
     } else {
       // Regular HTML flow
       await page.evaluate(() => {
@@ -235,7 +260,7 @@ export const handleScrape = async (
       const needsReadability =
         format.includes(ScrapeFormat.READABILITY) || format.includes(ScrapeFormat.MARKDOWN);
 
-      if (needsCleanedHtml) {
+      if (needsCleanedHtml && !isJson) {
         const cleanHtmlStart = Date.now();
         cleanedHtml = cleanHtml(htmlContent);
         times.cleanedHtmlTime = Date.now() - cleanHtmlStart;
@@ -245,7 +270,7 @@ export const handleScrape = async (
         }
       }
 
-      if (needsReadability) {
+      if (needsReadability && !isJson) {
         const readabilityStart = Date.now();
         readabilityContent = await getDefuddleContent(htmlContent, normalizedUrl || url);
         times.readabilityTime = Date.now() - readabilityStart;
@@ -263,11 +288,15 @@ export const handleScrape = async (
 
       if (format.includes(ScrapeFormat.MARKDOWN)) {
         const markdownStart = Date.now();
-        let markdown = readabilityContent!.contentMarkdown ?? "";
-        if (removeBase64Images) {
-          markdown = stripBase64Images(markdown);
+        if (isJson) {
+          scrapeResponse.content.markdown = jsonToMarkdown(htmlContent);
+        } else {
+          let markdown = readabilityContent!.contentMarkdown ?? "";
+          if (removeBase64Images) {
+            markdown = stripBase64Images(markdown);
+          }
+          scrapeResponse.content.markdown = markdown;
         }
-        scrapeResponse.content.markdown = markdown;
         times.markdownTime = Date.now() - markdownStart;
       }
     } else {
